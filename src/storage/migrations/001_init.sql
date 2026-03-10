@@ -1,1 +1,1 @@
-
+-- Initial schema for messages, groups, sessions, tasks, and generic state.

@@ -1,1 +1,1 @@
-
+// Vitest test runner configuration.
