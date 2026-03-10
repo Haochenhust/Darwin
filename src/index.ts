@@ -1,14 +1,13 @@
 import { config } from './config.js';
+import { createChannelRegistry } from './channels/registry.js';
 import { createLayerLogger } from './logger.js';
 
 const bootstrapLogger = createLayerLogger('bootstrap');
-const channelLogger = createLayerLogger('channel', {
-  channelName: 'feishu',
-});
 const orchestratorLogger = createLayerLogger('orchestrator');
 const agentLogger = createLayerLogger('agent');
 const toolLogger = createLayerLogger('tool');
 const appLogger = createLayerLogger('app');
+const channelRegistry = createChannelRegistry();
 
 bootstrapLogger.info(
   {
@@ -19,12 +18,7 @@ bootstrapLogger.info(
   'Darwin runtime booting',
 );
 
-channelLogger.info(
-  {
-    connected: false,
-  },
-  'Channel layer initialized',
-);
+const channelStatuses = await channelRegistry.startAll();
 
 orchestratorLogger.info(
   {
@@ -50,6 +44,7 @@ toolLogger.info(
 appLogger.info(
   {
     heartbeatIntervalMs: config.heartbeatIntervalMs,
+    channels: channelStatuses,
   },
   'Darwin startup complete',
 );
@@ -63,11 +58,17 @@ const heartbeat = setInterval(() => {
   );
 }, config.heartbeatIntervalMs);
 
-const shutdown = (signal: NodeJS.Signals) => {
+const shutdown = async (signal: NodeJS.Signals) => {
   clearInterval(heartbeat);
-  bootstrapLogger.info({ signal }, 'Darwin shutting down');
+  const stoppedChannels = await channelRegistry.stopAll();
+  bootstrapLogger.info({ signal, channels: stoppedChannels }, 'Darwin shutting down');
   process.exit(0);
 };
 
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => {
+  void shutdown('SIGINT');
+});
+
+process.on('SIGTERM', () => {
+  void shutdown('SIGTERM');
+});

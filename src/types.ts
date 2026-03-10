@@ -7,6 +7,8 @@ export type LayerName =
   | 'storage'
   | 'app';
 
+export type ChannelName = 'feishu';
+
 export interface LogContext {
   chatId?: string;
   messageId?: string;

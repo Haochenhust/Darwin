@@ -1,1 +1,23 @@
-// Channel interface definitions such as connect, disconnect, sendMessage, and setTyping.
+import type { ChannelName } from '../types.js';
+
+export interface ChannelLifecycleSummary {
+  name: ChannelName;
+  connected: boolean;
+  configured: boolean;
+}
+
+export interface OutboundMessage {
+  receiveId: string;
+  receiveIdType: 'chat_id' | 'open_id' | 'user_id' | 'union_id';
+  content: string;
+  messageType?: 'text' | 'interactive' | 'post' | 'image' | 'file' | 'audio' | 'media' | 'sticker' | 'share_chat' | 'share_user';
+}
+
+export interface Channel {
+  readonly name: ChannelName;
+  isConfigured(): boolean;
+  connect(): Promise<void>;
+  disconnect(): Promise<void>;
+  sendMessage(message: OutboundMessage): Promise<void>;
+  getStatus(): ChannelLifecycleSummary;
+}
