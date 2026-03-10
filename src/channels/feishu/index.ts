@@ -4,9 +4,11 @@ import { config } from '../../config.js';
 import { createLayerLogger } from '../../logger.js';
 import type { Channel, ChannelLifecycleSummary, OutboundMessage } from '../types.js';
 import { createFeishuClientBundle, type FeishuClientBundle } from './client.js';
+import { buildEchoReply, parseFeishuMessage, type FeishuMessageReceiveEvent } from './message-handler.js';
 import {
   FEISHU_CHANNEL_NAME,
   FEISHU_DEFAULT_MESSAGE_TYPE,
+  FEISHU_MESSAGE_EVENT,
 } from './constants.js';
 
 const logger = createLayerLogger('channel', {
@@ -80,6 +82,7 @@ export class FeishuChannel implements Channel {
 
     logger.info(
       {
+        receiveId: message.receiveId,
         receiveIdType: message.receiveIdType,
       },
       'Outbound Feishu message sent',
@@ -87,7 +90,52 @@ export class FeishuChannel implements Channel {
   }
 
   private createEventHandles(): EventHandles {
-    return {};
+    return {
+      [FEISHU_MESSAGE_EVENT]: async (event: FeishuMessageReceiveEvent) => {
+        const parsedMessage = parseFeishuMessage(event);
+        const messageLogger = logger.child({
+          chatId: parsedMessage.chatId,
+          messageId: parsedMessage.messageId,
+        });
+
+        messageLogger.info(
+          {
+            chatType: parsedMessage.chatType,
+            messageType: parsedMessage.messageType,
+            text: parsedMessage.text,
+          },
+          'Inbound Feishu message parsed',
+        );
+
+        if (!parsedMessage.shouldProcess) {
+          messageLogger.info(
+            {
+              reason: parsedMessage.ignoreReason,
+            },
+            'Inbound Feishu message skipped',
+          );
+          return;
+        }
+
+        await this.sendMessage({
+          receiveId: parsedMessage.senderOpenId ?? parsedMessage.senderUserId ?? parsedMessage.chatId,
+          receiveIdType: parsedMessage.senderOpenId
+            ? 'open_id'
+            : parsedMessage.senderUserId
+              ? 'user_id'
+              : 'chat_id',
+          content: buildEchoReply(parsedMessage),
+          messageType: FEISHU_DEFAULT_MESSAGE_TYPE,
+        });
+
+        messageLogger.info(
+          {
+            echoText: parsedMessage.text,
+          },
+          'Echo reply sent',
+        );
+      },
+    };
   }
 }
 

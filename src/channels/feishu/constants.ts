@@ -3,6 +3,9 @@ import { AppType, Domain, LoggerLevel } from '@larksuiteoapi/node-sdk';
 export const FEISHU_CHANNEL_NAME = 'feishu' as const;
 export const FEISHU_MESSAGE_EVENT = 'im.message.receive_v1' as const;
 export const FEISHU_DEFAULT_MESSAGE_TYPE = 'text' as const;
+export const FEISHU_PRIVATE_CHAT_TYPES = new Set(['p2p', 'p2p_chat']);
+export const FEISHU_GROUP_CHAT_TYPES = new Set(['group', 'group_chat']);
+export const FEISHU_TEXT_MESSAGE_TYPE = 'text' as const;
 export const FEISHU_WS_LOGGER_LEVEL = LoggerLevel.info;
 export const FEISHU_APP_TYPE = AppType.SelfBuild;
 
