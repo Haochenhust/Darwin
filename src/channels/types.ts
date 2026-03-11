@@ -1,4 +1,5 @@
 import type { ChannelName } from '../types.js';
+import type { MessageTriggerSource } from '../storage/repositories/message-repo.js';
 
 export interface ChannelLifecycleSummary {
   name: ChannelName;
@@ -11,6 +12,13 @@ export interface OutboundMessage {
   receiveIdType: 'chat_id' | 'open_id' | 'user_id' | 'union_id';
   content: string;
   messageType?: 'text' | 'interactive' | 'post' | 'image' | 'file' | 'audio' | 'media' | 'sticker' | 'share_chat' | 'share_user';
+  storageContext?: {
+    chatId: string;
+    groupName?: string;
+    sessionId?: string;
+    triggerSource?: MessageTriggerSource;
+    sourceMessageId?: string;
+  };
 }
 
 export interface Channel {

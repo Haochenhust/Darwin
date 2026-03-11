@@ -8,6 +8,7 @@ export const FEISHU_GROUP_CHAT_TYPES = new Set(['group', 'group_chat']);
 export const FEISHU_TEXT_MESSAGE_TYPE = 'text' as const;
 export const FEISHU_WS_LOGGER_LEVEL = LoggerLevel.info;
 export const FEISHU_APP_TYPE = AppType.SelfBuild;
+export const FEISHU_MAIN_GROUP_NAME = 'main' as const;
 
 export const FEISHU_DOMAIN_MAP = {
   feishu: Domain.Feishu,

@@ -17,6 +17,7 @@ export interface AppConfig {
   logLevel: pino.LevelWithSilent;
   prettyLogs: boolean;
   heartbeatIntervalMs: number;
+  databasePath: string;
   feishu: FeishuConfig;
 }
 
@@ -78,6 +79,7 @@ export const config: AppConfig = {
   logLevel: parseLogLevel(process.env.LOG_LEVEL),
   prettyLogs: parseBoolean(process.env.LOG_PRETTY, nodeEnv !== 'production'),
   heartbeatIntervalMs: parsePositiveInteger(process.env.HEARTBEAT_INTERVAL_MS, 300_000),
+  databasePath: process.env.DARWIN_DB_PATH?.trim() || 'data/darwin.db',
   feishu: {
     enabled: feishuIsFullyConfigured,
     appId: feishuAppId,

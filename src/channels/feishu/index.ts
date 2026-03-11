@@ -5,6 +5,12 @@ import type { EventHandles } from '@larksuiteoapi/node-sdk';
 
 import { config } from '../../config.js';
 import { createLayerLogger } from '../../logger.js';
+import {
+  createMessageRepo,
+  type MessageRecord,
+  type MessageStatus,
+} from '../../storage/repositories/message-repo.js';
+import { getDatabase } from '../../storage/db.js';
 import type { Channel, ChannelLifecycleSummary, OutboundMessage } from '../types.js';
 import {
   createConfirmationCardMessage,
@@ -30,6 +36,7 @@ import {
 import {
   FEISHU_CHANNEL_NAME,
   FEISHU_DEFAULT_MESSAGE_TYPE,
+  FEISHU_MAIN_GROUP_NAME,
   FEISHU_MESSAGE_EVENT,
 } from './constants.js';
 
@@ -41,11 +48,14 @@ const buildTextMessageContent = (text: string): string => {
   return JSON.stringify({ text });
 };
 
+type FeishuOutboundTarget = Pick<OutboundMessage, 'receiveId' | 'receiveIdType' | 'storageContext'>;
+
 export class FeishuChannel implements Channel {
   public readonly name = FEISHU_CHANNEL_NAME;
 
   private bundle?: FeishuClientBundle;
   private connected = false;
+  private readonly messageRepo = createMessageRepo(getDatabase().database);
 
   public isConfigured(): boolean {
     return config.feishu.enabled;
@@ -95,7 +105,7 @@ export class FeishuChannel implements Channel {
       throw new Error('Feishu channel is not connected.');
     }
 
-    await this.bundle.apiClient.im.message.create({
+    const response = await this.bundle.apiClient.im.message.create({
       params: {
         receive_id_type: message.receiveIdType,
       },
@@ -106,17 +116,47 @@ export class FeishuChannel implements Channel {
       },
     });
 
+    const messageId =
+      typeof response?.data?.message_id === 'string' && response.data.message_id.length > 0
+        ? response.data.message_id
+        : null;
+
+    this.messageRepo.insert({
+      channelName: this.name,
+      chatId: message.storageContext?.chatId ?? message.receiveId,
+      groupName: message.storageContext?.groupName ?? null,
+      direction: 'outbound',
+      status: 'done',
+      triggerSource: message.storageContext?.triggerSource ?? 'chat',
+      messageId,
+      sessionId: message.storageContext?.sessionId ?? null,
+      textContent: this.extractTextPreview(message.content, message.messageType),
+      rawPayload: {
+        request: {
+          receiveId: message.receiveId,
+          receiveIdType: message.receiveIdType,
+          messageType: message.messageType ?? FEISHU_DEFAULT_MESSAGE_TYPE,
+          content: message.content,
+        },
+        response,
+        sourceMessageId: message.storageContext?.sourceMessageId ?? null,
+      },
+    });
+
     logger.info(
       {
+        chatId: message.storageContext?.chatId,
+        groupName: message.storageContext?.groupName,
         receiveId: message.receiveId,
         receiveIdType: message.receiveIdType,
+        outboundMessageId: messageId,
       },
       'Outbound Feishu message sent',
     );
   }
 
   public async sendInfoDisplayCard(
-    target: Pick<OutboundMessage, 'receiveId' | 'receiveIdType'>,
+    target: FeishuOutboundTarget,
     card: FeishuInfoCardOptions,
   ): Promise<void> {
     await this.sendMessage(
@@ -128,7 +168,7 @@ export class FeishuChannel implements Channel {
   }
 
   public async sendConfirmationCard(
-    target: Pick<OutboundMessage, 'receiveId' | 'receiveIdType'>,
+    target: FeishuOutboundTarget,
     card: FeishuConfirmationCardOptions,
   ): Promise<void> {
     await this.sendMessage(
@@ -140,7 +180,7 @@ export class FeishuChannel implements Channel {
   }
 
   public async sendProgressStatusCard(
-    target: Pick<OutboundMessage, 'receiveId' | 'receiveIdType'>,
+    target: FeishuOutboundTarget,
     card: FeishuProgressStatusCardOptions,
   ): Promise<void> {
     await this.sendMessage(
@@ -208,7 +248,7 @@ export class FeishuChannel implements Channel {
   }
 
   public async sendImage(
-    target: Pick<OutboundMessage, 'receiveId' | 'receiveIdType'>,
+    target: FeishuOutboundTarget,
     options: { imageKey: string } | { filePath: string },
   ): Promise<void> {
     const imageKey =
@@ -225,7 +265,7 @@ export class FeishuChannel implements Channel {
   }
 
   public async sendPost(
-    target: Pick<OutboundMessage, 'receiveId' | 'receiveIdType'>,
+    target: FeishuOutboundTarget,
     post: FeishuPostOptions,
   ): Promise<void> {
     await this.sendMessage(
@@ -240,9 +280,11 @@ export class FeishuChannel implements Channel {
     return {
       [FEISHU_MESSAGE_EVENT]: async (event: FeishuMessageReceiveEvent) => {
         const parsedMessage = parseFeishuMessage(event);
+        const inboundRecord = this.persistInboundMessage(event, parsedMessage);
         const messageLogger = logger.child({
           chatId: parsedMessage.chatId,
           messageId: parsedMessage.messageId,
+          groupName: FEISHU_MAIN_GROUP_NAME,
         });
 
         messageLogger.info(
@@ -255,7 +297,18 @@ export class FeishuChannel implements Channel {
           'Inbound Feishu message parsed',
         );
 
+        if (!inboundRecord) {
+          messageLogger.info(
+            {
+              eventId: parsedMessage.eventId,
+            },
+            'Inbound Feishu message skipped because it is already persisted',
+          );
+          return;
+        }
+
         if (!parsedMessage.shouldProcess) {
+          this.messageRepo.markDone(inboundRecord.id);
           messageLogger.info(
             {
               reason: parsedMessage.ignoreReason,
@@ -264,6 +317,8 @@ export class FeishuChannel implements Channel {
           );
           return;
         }
+
+        this.messageRepo.markProcessing(inboundRecord.id);
 
         const replyTarget = resolveReplyTarget({
           receiveId: parsedMessage.senderOpenId ?? parsedMessage.senderUserId ?? parsedMessage.chatId,
@@ -274,95 +329,179 @@ export class FeishuChannel implements Channel {
               : 'chat_id',
         });
 
-        const debugCommand = parsedMessage.text
-          ? parseFeishuDebugCommand(parsedMessage.text)
-          : null;
+        const outboundContext = {
+          chatId: parsedMessage.chatId,
+          groupName: FEISHU_MAIN_GROUP_NAME,
+          sourceMessageId: parsedMessage.messageId,
+        };
 
-        if (debugCommand) {
-          const debugPayloads = buildFeishuDebugPayloads();
+        try {
+          const debugCommand = parsedMessage.text
+            ? parseFeishuDebugCommand(parsedMessage.text)
+            : null;
 
-          switch (debugCommand.name) {
-            case 'card-info':
-              await this.sendInfoDisplayCard(replyTarget, debugPayloads.infoCard);
-              messageLogger.info({ command: debugCommand.name }, 'Debug command handled');
-              return;
-            case 'card-confirm':
-              await this.sendConfirmationCard(replyTarget, debugPayloads.confirmationCard);
-              messageLogger.info({ command: debugCommand.name }, 'Debug command handled');
-              return;
-            case 'card-progress':
-              await this.sendProgressStatusCard(replyTarget, debugPayloads.progressCard);
-              messageLogger.info({ command: debugCommand.name }, 'Debug command handled');
-              return;
-            case 'post':
-              await this.sendPost(replyTarget, debugPayloads.post);
-              messageLogger.info({ command: debugCommand.name }, 'Debug command handled');
-              return;
-            case 'image':
-              if (debugCommand.args[0]) {
-                await this.sendImage(replyTarget, {
-                  imageKey: debugCommand.args[0],
-                });
-              } else {
+          if (debugCommand) {
+            const debugPayloads = buildFeishuDebugPayloads();
+
+            switch (debugCommand.name) {
+              case 'card-info':
+                await this.sendInfoDisplayCard(
+                  { ...replyTarget, storageContext: outboundContext },
+                  debugPayloads.infoCard,
+                );
+                messageLogger.info({ command: debugCommand.name }, 'Debug command handled');
+                this.messageRepo.markDone(inboundRecord.id);
+                return;
+              case 'card-confirm':
+                await this.sendConfirmationCard(
+                  { ...replyTarget, storageContext: outboundContext },
+                  debugPayloads.confirmationCard,
+                );
+                messageLogger.info({ command: debugCommand.name }, 'Debug command handled');
+                this.messageRepo.markDone(inboundRecord.id);
+                return;
+              case 'card-progress':
+                await this.sendProgressStatusCard(
+                  { ...replyTarget, storageContext: outboundContext },
+                  debugPayloads.progressCard,
+                );
+                messageLogger.info({ command: debugCommand.name }, 'Debug command handled');
+                this.messageRepo.markDone(inboundRecord.id);
+                return;
+              case 'post':
+                await this.sendPost(
+                  { ...replyTarget, storageContext: outboundContext },
+                  debugPayloads.post,
+                );
+                messageLogger.info({ command: debugCommand.name }, 'Debug command handled');
+                this.messageRepo.markDone(inboundRecord.id);
+                return;
+              case 'image':
+                if (debugCommand.args[0]) {
+                  await this.sendImage(
+                    { ...replyTarget, storageContext: outboundContext },
+                    {
+                      imageKey: debugCommand.args[0],
+                    },
+                  );
+                } else {
+                  await this.sendMessage({
+                    ...replyTarget,
+                    content: buildTextMessageContent('Usage: /test image <image_key>'),
+                    messageType: FEISHU_DEFAULT_MESSAGE_TYPE,
+                    storageContext: outboundContext,
+                  });
+                }
+                messageLogger.info(
+                  { command: debugCommand.name, args: debugCommand.args },
+                  'Debug command handled',
+                );
+                this.messageRepo.markDone(inboundRecord.id);
+                return;
+              case 'help':
+              default:
                 await this.sendMessage({
                   ...replyTarget,
-                  content: buildTextMessageContent(
-                    'Usage: /test image <image_key>',
-                  ),
+                  content: buildTextMessageContent(buildFeishuDebugHelpText()),
                   messageType: FEISHU_DEFAULT_MESSAGE_TYPE,
+                  storageContext: outboundContext,
                 });
-              }
-              messageLogger.info(
-                { command: debugCommand.name, args: debugCommand.args },
-                'Debug command handled',
-              );
-              return;
-            case 'help':
-            default:
-              await this.sendMessage({
-                ...replyTarget,
-                content: buildTextMessageContent(buildFeishuDebugHelpText()),
-                messageType: FEISHU_DEFAULT_MESSAGE_TYPE,
-              });
-              messageLogger.info({ command: debugCommand.name }, 'Debug command handled');
-              return;
+                messageLogger.info({ command: debugCommand.name }, 'Debug command handled');
+                this.messageRepo.markDone(inboundRecord.id);
+                return;
+            }
           }
-        }
 
-        if (parsedMessage.messageType === 'image' && parsedMessage.imageKey) {
-          const echoedImageKey = await this.cloneInboundImage(
-            parsedMessage.messageId,
-            parsedMessage.imageKey,
-          );
+          if (parsedMessage.messageType === 'image' && parsedMessage.imageKey) {
+            const echoedImageKey = await this.cloneInboundImage(
+              parsedMessage.messageId,
+              parsedMessage.imageKey,
+            );
 
-          await this.sendImage(replyTarget, {
-            imageKey: echoedImageKey,
+            await this.sendImage(
+              { ...replyTarget, storageContext: outboundContext },
+              {
+                imageKey: echoedImageKey,
+              },
+            );
+
+            messageLogger.info(
+              {
+                sourceImageKey: parsedMessage.imageKey,
+                echoedImageKey,
+              },
+              'Image echo sent',
+            );
+            this.messageRepo.markDone(inboundRecord.id);
+            return;
+          }
+
+          await this.sendMessage({
+            ...replyTarget,
+            content: buildEchoReply(parsedMessage),
+            messageType: FEISHU_DEFAULT_MESSAGE_TYPE,
+            storageContext: outboundContext,
           });
 
           messageLogger.info(
             {
-              sourceImageKey: parsedMessage.imageKey,
-              echoedImageKey,
+              echoText: parsedMessage.text,
             },
-            'Image echo sent',
+            'Echo reply sent',
           );
-          return;
+          this.messageRepo.markDone(inboundRecord.id);
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          this.messageRepo.markFailed(inboundRecord.id, errorMessage);
+          messageLogger.error({ error }, 'Failed to handle inbound Feishu message');
+          throw error;
         }
-
-        await this.sendMessage({
-          ...replyTarget,
-          content: buildEchoReply(parsedMessage),
-          messageType: FEISHU_DEFAULT_MESSAGE_TYPE,
-        });
-
-        messageLogger.info(
-          {
-            echoText: parsedMessage.text,
-          },
-          'Echo reply sent',
-        );
       },
     };
+  }
+
+  private persistInboundMessage(
+    event: FeishuMessageReceiveEvent,
+    parsedMessage: ReturnType<typeof parseFeishuMessage>,
+  ): MessageRecord | null {
+    if (parsedMessage.eventId) {
+      const existingRecord = this.messageRepo.findByEventId(this.name, parsedMessage.eventId);
+
+      if (existingRecord) {
+        return null;
+      }
+    }
+
+    return this.messageRepo.insert({
+      channelName: this.name,
+      chatId: parsedMessage.chatId,
+      groupName: FEISHU_MAIN_GROUP_NAME,
+      direction: 'inbound',
+      status: 'received',
+      triggerSource: 'chat',
+      eventId: parsedMessage.eventId ?? null,
+      messageId: parsedMessage.messageId,
+      senderId: parsedMessage.senderOpenId ?? parsedMessage.senderUserId ?? null,
+      messageType: parsedMessage.messageType,
+      threadRootId: event.message.root_id ?? null,
+      parentId: event.message.parent_id ?? null,
+      textContent: parsedMessage.text ?? parsedMessage.imageKey ?? null,
+      rawPayload: event,
+      errorMessage: parsedMessage.shouldProcess ? null : parsedMessage.ignoreReason ?? null,
+    });
+  }
+
+  private extractTextPreview(content: string, messageType?: OutboundMessage['messageType']): string | null {
+    if (messageType && messageType !== 'text') {
+      return null;
+    }
+
+    try {
+      const parsedContent = JSON.parse(content) as { text?: unknown };
+      return typeof parsedContent.text === 'string' ? parsedContent.text : null;
+    } catch {
+      return null;
+    }
   }
 }
 

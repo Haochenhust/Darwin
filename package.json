@@ -9,14 +9,17 @@
   "scripts": {
     "dev": "nodemon --watch src --watch .env --ext ts,mts,cts,env --exec \"node --import tsx src/index.ts\"",
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "migrate": "node --import tsx scripts/migrate.ts"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.54.0",
+    "better-sqlite3": "^11.10.0",
     "dotenv": "^16.6.1",
     "pino": "^10.0.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.6.0",
     "nodemon": "^3.1.10",
     "pino-pretty": "^13.1.2",
